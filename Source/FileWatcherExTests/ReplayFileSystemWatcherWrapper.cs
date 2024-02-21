@@ -77,6 +77,8 @@ public class ReplayFileSystemWatcherWrapper : IFileSystemWatcherWrapper
 
     public Collection<string> Filters => _filters;
 
+    public string Filter { get; set; }
+
     public bool IncludeSubdirectories { get; set; }
     public bool EnableRaisingEvents { get; set; }
     public NotifyFilters NotifyFilter { get; set; }

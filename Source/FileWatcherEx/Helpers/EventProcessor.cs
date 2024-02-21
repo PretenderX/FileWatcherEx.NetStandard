@@ -2,103 +2,108 @@
  * Copyright (C) Microsoft Corporation. All rights reserved.
  *--------------------------------------------------------*/
 
-namespace FileWatcherEx.Helpers;
+using System;
+using System.Collections.Generic;
+using System.Threading.Tasks;
 
-internal class EventProcessor
+namespace FileWatcherEx.Helpers
 {
-    /// <summary>
-    /// Aggregate and only emit events when changes have stopped for this duration (in ms)
-    /// </summary>
-    private const int EventDelay = 50;
+    internal class EventProcessor
+    {
+        /// <summary>
+        /// Aggregate and only emit events when changes have stopped for this duration (in ms)
+        /// </summary>
+        private const int EventDelay = 50;
 
-    /// <summary>
-    /// Warn after certain time span of event spam
-    /// </summary>
-    private readonly TimeSpan _eventSpamWarningThreshold = TimeSpan.FromMinutes(1);
+        /// <summary>
+        /// Warn after certain time span of event spam
+        /// </summary>
+        private readonly TimeSpan _eventSpamWarningThreshold = TimeSpan.FromMinutes(1);
 
-    private readonly object _lock = new();
-    private Task? _delayTask = null;
+        private readonly object _lock = new object();
+        private Task _delayTask = null;
 
-    private readonly List<FileChangedEvent> _events = new();
-    private readonly Action<FileChangedEvent> _handleEvent;
+        private readonly List<FileChangedEvent> _events = new List<FileChangedEvent>();
+        private readonly Action<FileChangedEvent> _handleEvent;
 
-    private readonly Action<string> _logger;
+        private readonly Action<string> _logger;
 
-    private long _lastEventTime = 0;
-    private long _delayStarted = 0;
+        private long _lastEventTime = 0;
+        private long _delayStarted = 0;
 
-    private long _spamCheckStartTime = 0;
-    private bool _spamWarningLogged = false;
+        private long _spamCheckStartTime = 0;
+        private bool _spamWarningLogged = false;
     
-    public EventProcessor(Action<FileChangedEvent> onEvent, Action<string> onLogging)
-    {
-        _handleEvent = onEvent;
-        _logger = onLogging;
-    }
-
-
-    public void ProcessEvent(FileChangedEvent fileEvent)
-    {
-        lock (_lock)
+        public EventProcessor(Action<FileChangedEvent> onEvent, Action<string> onLogging)
         {
-            var now = DateTime.Now.Ticks;
-            WarnForSpam(fileEvent, now);
+            _handleEvent = onEvent;
+            _logger = onLogging;
+        }
 
-            // Add into our queue
-            _events.Add(fileEvent);
-            _lastEventTime = now;
 
-            // Process queue after delay
-            if (_delayTask == null)
+        public void ProcessEvent(FileChangedEvent fileEvent)
+        {
+            lock (_lock)
             {
-                // Start function after delay
-                _delayStarted = _lastEventTime;
-                _delayTask = Task.Delay(EventDelay).ContinueWith(HandleEventsFunc);
+                var now = DateTime.Now.Ticks;
+                WarnForSpam(fileEvent, now);
+
+                // Add into our queue
+                _events.Add(fileEvent);
+                _lastEventTime = now;
+
+                // Process queue after delay
+                if (_delayTask == null)
+                {
+                    // Start function after delay
+                    _delayStarted = _lastEventTime;
+                    _delayTask = Task.Delay(EventDelay).ContinueWith(HandleEventsFunc);
+                }
             }
         }
-    }
 
-    private void HandleEventsFunc(Task _)
-    {
-        lock (_lock)
+        private void HandleEventsFunc(Task _)
         {
-            // Check if another event has been received in the meantime
-            if (_delayStarted == _lastEventTime)
+            lock (_lock)
             {
-                // Normalize and handle
-                var normalized = new EventNormalizer().Normalize(_events.ToArray());
-                foreach (var ev in normalized)
+                // Check if another event has been received in the meantime
+                if (_delayStarted == _lastEventTime)
                 {
-                    _handleEvent(ev);
+                    // Normalize and handle
+                    var normalized = new EventNormalizer().Normalize(_events.ToArray());
+                    foreach (var ev in normalized)
+                    {
+                        _handleEvent(ev);
+                    }
+
+                    // Reset
+                    _events.Clear();
+                    _delayTask = null;
                 }
 
-                // Reset
-                _events.Clear();
-                _delayTask = null;
+                // Otherwise we have received a new event while this task was
+                // delayed and we reschedule it.
+                else
+                {
+                    _delayStarted = _lastEventTime;
+                    _delayTask = Task.Delay(EventDelay).ContinueWith(HandleEventsFunc);
+                }
             }
+        }
 
-            // Otherwise we have received a new event while this task was
-            // delayed and we reschedule it.
-            else
+        private void WarnForSpam(FileChangedEvent fileEvent, long now)
+        {
+            if (_events.Count == 0)
             {
-                _delayStarted = _lastEventTime;
-                _delayTask = Task.Delay(EventDelay).ContinueWith(HandleEventsFunc);
+                _spamWarningLogged = false;
+                _spamCheckStartTime = now;
             }
-        }
-    }
-
-    private void WarnForSpam(FileChangedEvent fileEvent, long now)
-    {
-        if (_events.Count == 0)
-        {
-            _spamWarningLogged = false;
-            _spamCheckStartTime = now;
-        }
-        else if (! _spamWarningLogged && _spamCheckStartTime + _eventSpamWarningThreshold.Ticks < now)
-        {
-            _spamWarningLogged = true;
-            _logger($"Warning: Watcher is busy catching up with {_events.Count} file changes " +
-                    $"in {_eventSpamWarningThreshold.TotalSeconds} seconds. Latest path is '{fileEvent.FullPath}'");
+            else if (! _spamWarningLogged && _spamCheckStartTime + _eventSpamWarningThreshold.Ticks < now)
+            {
+                _spamWarningLogged = true;
+                _logger($"Warning: Watcher is busy catching up with {_events.Count} file changes " +
+                        $"in {_eventSpamWarningThreshold.TotalSeconds} seconds. Latest path is '{fileEvent.FullPath}'");
+            }
         }
     }
 }
